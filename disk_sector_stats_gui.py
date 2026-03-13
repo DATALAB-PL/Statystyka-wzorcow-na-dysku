@@ -1415,6 +1415,17 @@ class DiskAnalyzerGUI:
 
     # ── Analysis control ──────────────────────────────────────────────────────
 
+    def _get_source_display_name(self, source):
+        """Get human-friendly name for the source (disk model or file name)."""
+        # Check if source matches a detected physical disk
+        for disk in self.detected_disks:
+            if disk["path"].lower() == source.lower():
+                return f"{disk['model']} ({disk['path']})"
+        # For image files, show filename
+        if os.path.isfile(source):
+            return f"{os.path.basename(source)} ({source})"
+        return source
+
     def _start_analysis(self):
         if self.state == self.STATE_RUNNING:
             return
@@ -1432,6 +1443,7 @@ class DiskAnalyzerGUI:
         self.paused_state = None
         self.paused_params = None
         self.last_stats = None
+        self.source_display_name = self._get_source_display_name(source)
         self.paused_params = (source, start_lba, end_lba, sector_size,
                               patterns, chunk_sectors)
         self._launch_thread(source, start_lba, end_lba, sector_size,
@@ -1506,6 +1518,7 @@ class DiskAnalyzerGUI:
             source, start_lba, end_lba, sector_size, patterns, chunk = \
                 self.paused_params
             partial = self.paused_state
+            display_name = getattr(self, "source_display_name", source)
             return {
                 "counts": partial["counts"],
                 "total_sectors": partial["total_sectors"],
@@ -1516,7 +1529,7 @@ class DiskAnalyzerGUI:
                 "error_sectors": partial["error_sectors"],
                 "start_lba": start_lba,
                 "end_lba": partial["current_lba"] - 1,
-                "source": source,
+                "source": display_name,
                 "pattern_names": [name for _, name in patterns],
             }
         return None
@@ -1626,6 +1639,9 @@ class DiskAnalyzerGUI:
         self._update_counters(data["counts"], data["total"])
 
     def _on_done(self, stats):
+        # Replace raw device path with friendly name in report
+        if hasattr(self, "source_display_name"):
+            stats["source"] = self.source_display_name
         self.last_stats = stats
         self.paused_state = None
         self.paused_params = None
