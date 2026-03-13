@@ -11,6 +11,7 @@ Requires Administrator privileges for physical disk access on Windows.
 import ctypes
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -30,6 +31,91 @@ def is_admin():
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
     except AttributeError:
         return True
+
+
+def get_physical_disks():
+    """Detect physical disks and their sizes using WMI (Windows).
+
+    Returns list of dicts: [{
+        "path": "\\\\.\\PhysicalDrive0",
+        "model": "Samsung SSD 970 EVO 1TB",
+        "size_bytes": 1000204886016,
+        "sectors": 1953525168,
+        "sector_size": 512,
+        "display": "PhysicalDrive0 — Samsung SSD 970 EVO 1TB (931.51 GB)",
+    }, ...]
+    """
+    disks = []
+    try:
+        result = subprocess.run(
+            ["wmic", "diskdrive", "get",
+             "DeviceID,Model,Size,BytesPerSector,MediaType,Status",
+             "/format:csv"],
+            capture_output=True, text=True, timeout=15,
+        )
+        lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+        if len(lines) < 2:
+            return disks
+
+        header = [h.strip() for h in lines[0].split(",")]
+        for line in lines[1:]:
+            cols = [c.strip() for c in line.split(",")]
+            if len(cols) != len(header):
+                continue
+            row = dict(zip(header, cols))
+
+            device_id = row.get("DeviceID", "")
+            model = row.get("Model", "Unknown")
+            size_str = row.get("Size", "0")
+            bps_str = row.get("BytesPerSector", "512")
+            media_type = row.get("MediaType", "")
+            status = row.get("Status", "")
+
+            if not device_id:
+                continue
+
+            try:
+                size_bytes = int(size_str) if size_str else 0
+            except ValueError:
+                size_bytes = 0
+
+            try:
+                sector_size = int(bps_str) if bps_str else 512
+            except ValueError:
+                sector_size = 512
+
+            if sector_size <= 0:
+                sector_size = 512
+
+            total_sectors = size_bytes // sector_size if size_bytes > 0 else 0
+
+            # Build display string
+            size_display = format_size(size_bytes) if size_bytes > 0 else "? size"
+            drive_name = device_id.replace("\\\\.\\", "")
+            extra = []
+            if media_type:
+                extra.append(media_type)
+            if status and status.lower() != "ok":
+                extra.append(f"Status: {status}")
+            extra_str = f"  [{', '.join(extra)}]" if extra else ""
+
+            display = f"{drive_name} \u2014 {model} ({size_display}){extra_str}"
+
+            disks.append({
+                "path": device_id,
+                "model": model,
+                "size_bytes": size_bytes,
+                "sectors": total_sectors,
+                "sector_size": sector_size,
+                "display": display,
+            })
+
+    except Exception:
+        pass
+
+    # Sort by drive number
+    disks.sort(key=lambda d: d["path"])
+    return disks
 
 
 def open_disk(source):
@@ -344,9 +430,11 @@ class DiskAnalyzerGUI:
         self.stop_event = threading.Event()
         self.analysis_thread = None
         self.last_stats = None
+        self.detected_disks = []  # list of disk info dicts
 
         self._apply_style()
         self._build_ui()
+        self._detect_disks()
         self._poll_queue()
 
     def _apply_style(self):
@@ -376,6 +464,13 @@ class DiskAnalyzerGUI:
                          troughcolor=self.BG_LIGHT, background=self.ACCENT,
                          borderwidth=0, thickness=22)
 
+        style.configure("TCombobox", fieldbackground=self.BG_INPUT, foreground=self.FG,
+                         selectbackground=self.ACCENT, selectforeground=self.BG,
+                         borderwidth=1)
+        style.map("TCombobox",
+                   fieldbackground=[("readonly", self.BG_INPUT)],
+                   foreground=[("readonly", self.FG)])
+
         style.configure("TLabelframe", background=self.BG, foreground=self.ACCENT,
                          borderwidth=1, relief="solid")
         style.configure("TLabelframe.Label", background=self.BG, foreground=self.ACCENT,
@@ -394,11 +489,30 @@ class DiskAnalyzerGUI:
         params = ttk.LabelFrame(main, text="  Parameters  ", padding=10)
         params.pack(fill=tk.X, pady=(0, 8))
 
-        # Row 1: Source
+        # Row 0: Disk selector
+        row0 = ttk.Frame(params)
+        row0.pack(fill=tk.X, pady=2)
+        ttk.Label(row0, text="Disk:", width=12, anchor=tk.E).pack(side=tk.LEFT)
+        self.disk_combo_var = tk.StringVar()
+        self.disk_combo = ttk.Combobox(row0, textvariable=self.disk_combo_var,
+                                        state="readonly", width=70)
+        self.disk_combo.pack(side=tk.LEFT, padx=(6, 4), fill=tk.X, expand=True)
+        self.disk_combo.bind("<<ComboboxSelected>>", self._on_disk_selected)
+        ttk.Button(row0, text="Refresh", command=self._detect_disks,
+                   style="TButton").pack(side=tk.LEFT, padx=(2, 0))
+
+        # Row 0b: Disk info label
+        row0b = ttk.Frame(params)
+        row0b.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(row0b, text="", width=12).pack(side=tk.LEFT)
+        self.disk_info_label = ttk.Label(row0b, text="", style="Status.TLabel")
+        self.disk_info_label.pack(side=tk.LEFT, padx=(6, 0))
+
+        # Row 1: Source (manual override or image file)
         row1 = ttk.Frame(params)
         row1.pack(fill=tk.X, pady=2)
         ttk.Label(row1, text="Source:", width=12, anchor=tk.E).pack(side=tk.LEFT)
-        self.source_var = tk.StringVar(value="\\\\.\\PhysicalDrive1")
+        self.source_var = tk.StringVar()
         src_entry = ttk.Entry(row1, textvariable=self.source_var, width=50)
         src_entry.pack(side=tk.LEFT, padx=(6, 4), fill=tk.X, expand=True)
         ttk.Button(row1, text="Image file...", command=self._browse_image,
@@ -411,11 +525,13 @@ class DiskAnalyzerGUI:
         self.start_lba_var = tk.StringVar(value="0")
         ttk.Entry(row2, textvariable=self.start_lba_var, width=18).pack(side=tk.LEFT, padx=(6, 12))
         ttk.Label(row2, text="End LBA:", anchor=tk.E).pack(side=tk.LEFT)
-        self.end_lba_var = tk.StringVar(value="1000000")
+        self.end_lba_var = tk.StringVar(value="0")
         ttk.Entry(row2, textvariable=self.end_lba_var, width=18).pack(side=tk.LEFT, padx=(6, 12))
         ttk.Label(row2, text="Sector size:", anchor=tk.E).pack(side=tk.LEFT)
         self.sector_size_var = tk.StringVar(value="512")
-        ttk.Entry(row2, textvariable=self.sector_size_var, width=8).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Entry(row2, textvariable=self.sector_size_var, width=8).pack(side=tk.LEFT, padx=(6, 4))
+        self.capacity_label = ttk.Label(row2, text="", style="Status.TLabel")
+        self.capacity_label.pack(side=tk.LEFT, padx=(8, 0))
 
         # Row 3: Patterns & chunk
         row3 = ttk.Frame(params)
@@ -443,8 +559,11 @@ class DiskAnalyzerGUI:
                                    style="Save.TButton", state=tk.DISABLED)
         self.save_btn.pack(side=tk.LEFT, padx=(0, 6))
 
-        # Disk info button
-        ttk.Button(btn_row, text="List Disks", command=self._list_disks).pack(side=tk.RIGHT)
+        # Admin status indicator
+        admin_text = "Admin: Yes" if is_admin() else "Admin: No (limited)"
+        admin_color = self.GREEN if is_admin() else self.RED
+        ttk.Label(btn_row, text=admin_text, foreground=admin_color,
+                  font=("Segoe UI", 9)).pack(side=tk.RIGHT)
 
         # ── Progress area ──
         prog_frame = ttk.Frame(main)
@@ -503,6 +622,69 @@ class DiskAnalyzerGUI:
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
+    def _detect_disks(self):
+        """Detect physical disks and populate the combo box."""
+        self.detected_disks = get_physical_disks()
+
+        if self.detected_disks:
+            display_list = [d["display"] for d in self.detected_disks]
+            self.disk_combo["values"] = display_list
+            self.disk_combo.current(0)
+            self._on_disk_selected(None)
+        else:
+            self.disk_combo["values"] = ["(no disks detected — run as Administrator)"]
+            self.disk_combo.current(0)
+            self.disk_info_label.configure(
+                text="Could not detect disks. Run as Administrator for physical disk access.",
+                foreground=self.RED,
+            )
+
+    def _on_disk_selected(self, _event):
+        """Handle disk selection from combo box — auto-fill source, LBA, sector size."""
+        idx = self.disk_combo.current()
+        if idx < 0 or idx >= len(self.detected_disks):
+            return
+
+        disk = self.detected_disks[idx]
+        self.source_var.set(disk["path"])
+        self.start_lba_var.set("0")
+        self.sector_size_var.set(str(disk["sector_size"]))
+
+        if disk["sectors"] > 0:
+            end_lba = disk["sectors"] - 1
+            self.end_lba_var.set(str(end_lba))
+            self.disk_info_label.configure(
+                text=f"{disk['model']}  |  {format_size(disk['size_bytes'])}  |  "
+                     f"{disk['sectors']:,} sectors x {disk['sector_size']}B  |  "
+                     f"LBA 0 \u2014 {end_lba:,}",
+                foreground=self.GREEN,
+            )
+        else:
+            self.end_lba_var.set("0")
+            self.disk_info_label.configure(
+                text=f"{disk['model']}  |  Size unknown",
+                foreground=self.YELLOW,
+            )
+
+        self._update_capacity_label()
+
+    def _update_capacity_label(self):
+        """Show human-readable size of the selected LBA range."""
+        try:
+            start = int(self.start_lba_var.get())
+            end = int(self.end_lba_var.get())
+            ss = int(self.sector_size_var.get())
+            if end >= start and ss > 0:
+                total = (end - start + 1) * ss
+                self.capacity_label.configure(
+                    text=f"= {format_size(total)}  ({end - start + 1:,} sectors)",
+                    foreground=self.FG_DIM,
+                )
+            else:
+                self.capacity_label.configure(text="")
+        except ValueError:
+            self.capacity_label.configure(text="")
+
     def _browse_image(self):
         path = filedialog.askopenfilename(
             title="Select disk image file",
@@ -513,25 +695,22 @@ class DiskAnalyzerGUI:
         )
         if path:
             self.source_var.set(path)
-
-    def _list_disks(self):
-        """Show available physical disks (Windows)."""
-        try:
-            import subprocess
-            result = subprocess.run(
-                ["wmic", "diskdrive", "get", "Name,Model,Size,Status"],
-                capture_output=True, text=True, timeout=10,
-            )
-            output = result.stdout.strip()
-        except Exception as e:
-            output = f"Could not list disks: {e}"
-
-        self.report_text.configure(state=tk.NORMAL)
-        self.report_text.delete("1.0", tk.END)
-        self.report_text.insert(tk.END, "Available physical disks:\n\n")
-        self.report_text.insert(tk.END, output)
-        self.report_text.insert(tk.END, "\n\nUse the 'Name' column as the Source value "
-                                         "(e.g. \\\\.\\PHYSICALDRIVE1)")
+            # Auto-calculate end LBA from file size
+            try:
+                file_size = os.path.getsize(path)
+                ss = int(self.sector_size_var.get()) if self.sector_size_var.get() else 512
+                if file_size > 0 and ss > 0:
+                    total_sectors = file_size // ss
+                    self.start_lba_var.set("0")
+                    self.end_lba_var.set(str(total_sectors - 1) if total_sectors > 0 else "0")
+                    self.disk_info_label.configure(
+                        text=f"Image file: {format_size(file_size)}  |  "
+                             f"{total_sectors:,} sectors x {ss}B",
+                        foreground=self.ACCENT,
+                    )
+                    self._update_capacity_label()
+            except Exception:
+                pass
 
     def _validate_inputs(self):
         errors = []
