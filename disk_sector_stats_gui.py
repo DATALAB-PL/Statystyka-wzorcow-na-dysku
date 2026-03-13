@@ -1238,14 +1238,29 @@ class DiskAnalyzerGUI:
     def _switch_language(self, lang):
         if lang == self.lang:
             return
+        # Save field values before rebuild
+        saved = {}
+        for attr in ("source_var", "start_lba_var", "end_lba_var",
+                      "sector_size_var", "patterns_var", "chunk_var"):
+            var = getattr(self, attr, None)
+            if var:
+                saved[attr] = var.get()
+
         self.lang = lang
         self._build_all()
         self._detect_disks()
+
+        # Restore field values AFTER detect_disks (which overwrites them)
+        for attr, val in saved.items():
+            getattr(self, attr).set(val)
+        self._update_capacity_label()
+
         # Restore button states
         self._set_state(self.state)
         # Re-render report if exists
-        if self.last_stats:
-            report = generate_report(self.last_stats, lang=self.lang)
+        stats = self._get_report_stats()
+        if stats:
+            report = generate_report(stats, lang=self.lang)
             self.report_text.configure(state=tk.NORMAL)
             self.report_text.delete("1.0", tk.END)
             self.report_text.insert(tk.END, report)
@@ -1273,7 +1288,7 @@ class DiskAnalyzerGUI:
             self.pause_btn.configure(state=tk.DISABLED)
             self.resume_btn.configure(state=tk.NORMAL)
             self.stop_btn.configure(state=tk.NORMAL)
-            self.save_btn.configure(state=tk.DISABLED)
+            self.save_btn.configure(state=tk.NORMAL)
 
     # ── Disk detection ────────────────────────────────────────────────────────
 
@@ -1482,14 +1497,39 @@ class DiskAnalyzerGUI:
 
     # ── Save / Exit ───────────────────────────────────────────────────────────
 
+    def _get_report_stats(self):
+        """Get stats for report — from finished analysis or from paused state."""
+        if self.last_stats:
+            return self.last_stats
+        if self.paused_state and self.paused_params:
+            # Build partial stats from paused state
+            source, start_lba, end_lba, sector_size, patterns, chunk = \
+                self.paused_params
+            partial = self.paused_state
+            return {
+                "counts": partial["counts"],
+                "total_sectors": partial["total_sectors"],
+                "sector_size": sector_size,
+                "elapsed": partial["elapsed_before"],
+                "regions": partial["regions"],
+                "read_errors": partial["read_errors"],
+                "error_sectors": partial["error_sectors"],
+                "start_lba": start_lba,
+                "end_lba": partial["current_lba"] - 1,
+                "source": source,
+                "pattern_names": [name for _, name in patterns],
+            }
+        return None
+
     def _save_report(self):
-        if not self.last_stats:
+        stats = self._get_report_stats()
+        if not stats:
             return
         path = filedialog.asksaveasfilename(
             title=self._t("save_title"), defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
         if path:
-            report = generate_report(self.last_stats, lang=self.lang)
+            report = generate_report(stats, lang=self.lang)
             with open(path, "w", encoding="utf-8") as f:
                 f.write(report + "\n")
             self.status_label.configure(
@@ -1621,6 +1661,14 @@ class DiskAnalyzerGUI:
         self.eta_label.configure(text="")
         self._set_state(self.STATE_PAUSED)
         self._update_counters(partial["counts"], total)
+
+        # Generate and display partial report
+        stats = self._get_report_stats()
+        if stats:
+            report = generate_report(stats, lang=self.lang)
+            self.report_text.configure(state=tk.NORMAL)
+            self.report_text.delete("1.0", tk.END)
+            self.report_text.insert(tk.END, report)
 
     def _on_stopped(self):
         self.paused_state = None
