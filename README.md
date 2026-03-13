@@ -2,6 +2,10 @@
 
 Narzędzie forensyczne do analizy statystycznej zawartości sektorów dysku twardego. Skanuje surowe sektory w podanym zakresie LBA i klasyfikuje je według zawartości — pozwala szybko ocenić ile danych zostało na dysku po ataku hakerskim, wipe'ie lub uszkodzeniu.
 
+Dostępne w dwóch wersjach:
+- **CLI** (`disk_sector_stats.py`) — wersja konsolowa, idealna do skryptowania i automatyzacji
+- **GUI** (`disk_sector_stats_gui.py`) — wersja graficzna z ciemnym interfejsem, paskiem postępu i podglądem statystyk na żywo
+
 ## Problem
 
 Po ataku hakerskim lub operacji wipe dysk może wyglądać na "pusty", ale ręczne scrollowanie w edytorze heksadecymalnym ujawnia rozproszone fragmenty danych pomiędzy dużymi blokami zer. Potrzebna jest automatyczna statystyka, żeby odpowiedzieć na pytania:
@@ -22,9 +26,26 @@ Po ataku hakerskim lub operacji wipe dysk może wyglądać na "pusty", ale ręcz
 - **Zapis raportu do pliku** (`--output`)
 - **Brak zależności zewnętrznych** — czysty Python 3, biblioteka standardowa
 
+## Wersja GUI
+
+Wersja graficzna (`disk_sector_stats_gui.py`) oferuje:
+
+- **Ciemny interfejs** (dark theme) z kolorowym oznaczeniem stanów
+- **Podgląd statystyk na żywo** — liczniki sektorów aktualizowane w trakcie analizy
+- **Pasek postępu** z prędkością i ETA
+- **Przycisk Stop** — bezpieczne przerwanie analizy w dowolnym momencie
+- **Przycisk List Disks** — wyświetla dostępne dyski fizyczne (Windows)
+- **Przeglądarka obrazów** — dialog wyboru pliku `.dd`/`.img`/`.raw`
+- **Zapis raportu** do pliku tekstowego po zakończeniu analizy
+- **Walidacja danych wejściowych** przed rozpoczęciem
+
+```bash
+python disk_sector_stats_gui.py
+```
+
 ## Wymagania
 
-- Python 3.6+
+- Python 3.6+ (z tkinter — dołączony standardowo na Windows)
 - **Uprawnienia Administratora** (Windows) lub root (Linux) do odczytu dysku fizycznego
 - Brak zewnętrznych bibliotek
 
