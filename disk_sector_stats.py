@@ -54,7 +54,7 @@ def open_disk(source, sector_size):
             print(f"ERROR: Cannot open {source}. Run as Administrator.")
             sys.exit(1)
         except FileNotFoundError:
-            print(f"ERROR: Device {source} not found. Check disk number with 'wmic diskdrive list brief'.")
+            print(f"ERROR: Device {source} not found. Check disk number with 'powershell Get-CimInstance Win32_DiskDrive'.")
             sys.exit(1)
         return f
     else:
@@ -423,8 +423,7 @@ Examples:
   %(prog)s \\\\.\\PhysicalDrive1 0 1000000 --output report.txt --no-regions
 
 Note: Physical disk access requires Administrator privileges on Windows.
-      Use 'wmic diskdrive list brief' to find your disk number.
-      Use 'wmic diskdrive get name,size,model' for more details.
+      Use 'powershell Get-CimInstance Win32_DiskDrive' to find your disk number.
         """,
     )
 

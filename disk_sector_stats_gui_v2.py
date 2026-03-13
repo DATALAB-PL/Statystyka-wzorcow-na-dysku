@@ -544,18 +544,19 @@ def get_physical_disks():
     disks = []
     try:
         result = subprocess.run(
-            ["wmic", "diskdrive", "get",
-             "DeviceID,Model,Size,BytesPerSector,MediaType,Status",
-             "/format:csv"],
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_DiskDrive | "
+             "Select-Object DeviceID,Model,Size,BytesPerSector,MediaType,Status | "
+             "ConvertTo-Csv -NoTypeInformation"],
             capture_output=True, text=True, timeout=15,
         )
         lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
         if len(lines) < 2:
             return disks
 
-        header = [h.strip() for h in lines[0].split(",")]
+        header = [h.strip().strip('"') for h in lines[0].split(",")]
         for line in lines[1:]:
-            cols = [c.strip() for c in line.split(",")]
+            cols = [c.strip().strip('"') for c in line.split(",")]
             if len(cols) != len(header):
                 continue
             row = dict(zip(header, cols))
@@ -723,7 +724,20 @@ def analyze_disk_threaded(source, start_lba, end_lba, sector_size, patterns,
                     return
 
                 if stop_event.is_set():
-                    msg_queue.put(("stopped", None))
+                    elapsed_this_run = time.time() - start_time
+                    partial = {
+                        "current_lba": current_lba,
+                        "counts": dict(counts),
+                        "regions": list(regions),
+                        "last_region_type": current_region_type,
+                        "last_region_start": current_region_start,
+                        "read_errors": read_errors,
+                        "error_sectors": list(error_sectors),
+                        "elapsed_before": elapsed_before + elapsed_this_run,
+                        "sectors_processed": sectors_processed,
+                        "total_sectors": total_sectors,
+                    }
+                    msg_queue.put(("stopped", partial))
                     return
 
                 to_read = min(chunk_sectors, remaining)
@@ -1840,7 +1854,7 @@ class DiskAnalyzerGUI:
                 elif msg_type == "paused":
                     self._on_paused(data)
                 elif msg_type == "stopped":
-                    self._on_stopped()
+                    self._on_stopped(data)
                 elif msg_type == "error":
                     self._on_error(data)
         except queue.Empty:
@@ -1913,7 +1927,16 @@ class DiskAnalyzerGUI:
             self.report_text.delete("1.0", tk.END)
             self.report_text.insert(tk.END, report)
 
-    def _on_stopped(self):
+    def _on_stopped(self, partial=None):
+        if partial and self.paused_params:
+            self.paused_state = partial
+            stats = self._get_report_stats()
+            if stats:
+                self.last_stats = stats
+                report = generate_report(stats, lang=self.lang)
+                self.report_text.configure(state=tk.NORMAL)
+                self.report_text.delete("1.0", tk.END)
+                self.report_text.insert(tk.END, report)
         self.paused_state = None
         self.paused_params = None
         self.status_label.configure(text=self._t("status_stopped"),
